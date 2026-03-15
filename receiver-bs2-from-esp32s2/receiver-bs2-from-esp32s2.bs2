@@ -1,0 +1,119 @@
+' ================================================================
+' robot-bs2.bs2
+' BASIC Stamp 2 : Servo Controller (ACK mode)
+'
+' PROTOCOL:
+'   ESP32 sends 7-byte binary frame via UART:
+'     Byte 0: '!' (0x21)  sync 1
+'     Byte 1: '!' (0x21)  sync 2
+'     Byte 2: idLo        robot ID low byte
+'     Byte 3: idHi        robot ID high byte
+'     Byte 4: leftV       left servo  0..180 (90=stop)
+'     Byte 5: rightV      right servo 0..180 (90=stop)
+'     Byte 6: gripV       gripper     0..180 (0=open, 160=close)
+'
+'   BS2 acknowledges by pulsing ackPin HIGH for ACK_MS.
+'   ESP32 polls this GPIO; if no ACK, ESP32 resends.
+'
+' WIRING:
+'   BS2 P0  <- ESP32-S2 GPIO14 (Serial1 TX)  [direct wire, 3.3V]
+'   BS2 P1  -> ESP32-S2 GPIO13 (ACK input)   [voltage divider 5V->3.3V]
+'   BS2 P12 -> Gripper servo signal
+'   BS2 P13 -> Left wheel servo signal
+'   BS2 P14 -> Right wheel servo signal
+'   Servo power from separate supply (not BS2 Vdd)
+'
+' SERVO MAPPING (PULSOUT units = 2 us):
+'   microseconds = (angle * 100 / 18) + 1000
+'   PULSOUT value = microseconds / 2
+'   angle=0   -> 1000 us -> PULSOUT 500
+'   angle=90  -> 1500 us -> PULSOUT 750
+'   angle=180 -> 2000 us -> PULSOUT 1000
+'
+' GRIPPER uses wider range:
+'   microseconds = (angle * 100 / 9) + 500
+'   angle=0   -> 500 us  -> PULSOUT 250
+'   angle=180 -> 2500 us -> PULSOUT 1250
+' ================================================================
+
+' {$STAMP BS2}
+' {$PBASIC 2.5}
+
+' ---- UART ----
+rxPin       PIN   0
+baud        CON   84          ' 9600, non-inverted (true)
+LISTEN_MS   CON   20          ' SERIN timeout (ms)
+
+' ---- ACK ----
+ackPin      PIN   1           ' OUTPUT: pulsed HIGH after valid frame
+ACK_MS      CON   10          ' pulse width (ms)
+
+' ---- SERVO PINS ----
+PIN_G       CON   12          ' gripper
+PIN_L       CON   13          ' left wheel
+PIN_R       CON   14          ' right wheel
+
+' ---- ID FILTER ----
+MY_ID       CON   147
+FILTER_ON   CON   0           ' 0=accept all, 1=filter by MY_ID
+
+' ---- Variables ----
+idLo        VAR   Byte
+idHi        VAR   Byte
+leftV       VAR   Byte
+rightV      VAR   Byte
+gripV       VAR   Byte
+rid         VAR   Word
+pwL         VAR   Word        ' left pulse width (us)
+pwR         VAR   Word        ' right pulse width (us)
+pwG         VAR   Word        ' gripper pulse width (us)
+
+' ---- Initialization ----
+Start:
+  LOW ackPin
+  pwL = 1500 : pwR = 1500 : pwG = 500
+  DEBUG CLS, "BS2 ACTIVE. ACK mode.", CR
+  DEBUG "ID=", DEC MY_ID, "  Filter=", DEC FILTER_ON, CR
+
+' ================================================================
+' MAIN LOOP
+' ================================================================
+Main:
+  ' 1. Listen for binary frame (up to LISTEN_MS)
+  '    WAIT("!!") syncs to the two-byte marker.
+  '    Then reads 5 raw bytes: idLo, idHi, leftV, rightV, gripV.
+  SERIN rxPin, baud, LISTEN_MS, NoData, [WAIT("!!"), idLo, idHi, leftV, rightV, gripV]
+
+  ' 2. ID filter
+  rid = idLo + (idHi * 256)
+  IF (FILTER_ON = 1) AND (rid <> MY_ID) THEN GOTO NoAck
+
+  ' 3. Valid frame: compute servo pulse widths (microseconds)
+  IF (leftV  <= 180) THEN pwL = (leftV  * 100 / 18) + 1000
+  IF (rightV <= 180) THEN pwR = (rightV * 100 / 18) + 1000
+  IF (gripV  <= 180) THEN pwG = (gripV  * 100 /  9) + 500
+
+  DEBUG HOME, "OK ID:", DEC rid, " L:", DEC leftV, " R:", DEC rightV, " G:", DEC gripV
+
+  ' 4. ACK: pulse HIGH for ACK_MS so ESP32 knows we got it
+  HIGH ackPin
+  PAUSE ACK_MS
+  LOW ackPin
+  GOTO Refresh
+
+' ---- Frame received but wrong ID ----
+NoAck:
+  DEBUG HOME, "SKIP ID:", DEC rid
+  GOTO Refresh
+
+' ---- No frame within LISTEN_MS ----
+NoData:
+  ' Servos keep pulsing at last known values
+
+' ---- Pulse all servos ----
+Refresh:
+  PULSOUT PIN_L, (pwL / 2)
+  PULSOUT PIN_R, (pwR / 2)
+  PULSOUT PIN_G, (pwG / 2)
+  PAUSE 10
+  GOTO Main
